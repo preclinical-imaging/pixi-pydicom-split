@@ -1,8 +1,8 @@
-# pydicom_split
+# pixi-pydicom-split
 
 Wraps the [abcsFrederick/pydicom_split](https://github.com/abcsFrederick/pydicom_split) project into a container for use
 with the [XNAT Container Services plugin](https://github.com/NrgXnat/container-service) and the 
-[PIXI plugin](https://bitbucket.org/xnatx/pixi-plugin/src/main/). **NOTE: this is currently in development.**
+[PIXI plugin](https://github.com/preclinical-imaging/pixi-plugin).
 
 ## Instructions
 
