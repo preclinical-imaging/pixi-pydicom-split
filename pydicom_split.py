@@ -7,6 +7,7 @@ import sys
 import uuid
 import warnings
 import re
+import logging
 
 import numpy
 
@@ -14,9 +15,16 @@ import pydicom
 from pydicom.sequence import Sequence
 from pydicom.dataset import Dataset
 
+logging.basicConfig(stream=sys.stdout,
+                    filemode="w",
+                    format="%(levelname)s %(asctime)s - %(message)s",
+                    level=logging.DEBUG)
+
+logger = logging.getLogger()
 
 class DICOMDirectory:
     def __init__(self, directory=None):
+        logger.debug(f'DICOMDirectory: {directory}')
         self._directory = directory
 
     @property
@@ -38,7 +46,17 @@ class DICOMDirectory:
         while self.filenames:
             filename = self.filenames.pop(0)
             path = os.path.join(self._directory, filename)
+            if filename.endswith('catalog.xml'):
+                logger.info(f'Skipping catalog file: {path}')
+                continue
+            if filename.endswith('_qc.gif.xml'):
+                logger.info(f'Skipping quality control image file: {path}')
+                continue
+            if '.~lock' in filename:
+                logger.info(f'Skipping lock file: {path}')
+                continue
             try:
+                logger.debug(f'pydicom.dcmread({path})')
                 dataset = pydicom.dcmread(path)
             except pydicom.errors.InvalidDicomError:
                 warnings.warn('%s is not a valid DICOM file' % filename)
@@ -50,12 +68,13 @@ class DICOMDirectory:
         raise StopIteration
 
 class DICOMSplitterTB:
-    def __init__(self, pixel_array=None, axis=0, nT=2, nB=2, offset=5):
+    def __init__(self, pixel_array=None, axis=0, nT=2, nB=2, offset=0, offset_c=0):
         self._pixel_array = pixel_array
         self._axis = axis
         self._nT = nT
         self._nB = nB
         self._offset = offset
+        self._offset_c = offset_c
         self._nTotal = nB + nT
 
     @property
@@ -98,16 +117,24 @@ class DICOMSplitterTB:
     def offset(self, offset):
         self._offset = offset
 
+    @property
+    def offset_c(self):
+        return self._offset_c
+
+    @offset_c.setter
+    def offset_c(self, offset_c):
+        self._offset_c = offset_c
+
     def __iter__(self):
         self.index = 0
         if self._pixel_array is not None:
             # assume only 2 row for now
             sizeC = self._pixel_array.shape[1]
             sizeR = self._pixel_array.shape[0]
-            self._offsetInPx = math.floor(self._offset / 100 * sizeR)
+            self._offsetInPx = self._offset
+            self.sizeR = int(math.floor(sizeR / 2))
             self.sizeTC = int(math.floor(sizeC/self._nT))
             self.sizeBC = int(math.floor(sizeC/self._nB))
-            self.sizeR = int(math.floor(sizeR/2)) - self._offsetInPx
         return self
 
     def __next__(self):
@@ -133,12 +160,12 @@ class DICOMSplitterTB:
                 warnings.warn('image axis %d not divisible by %d'
                               ', split %d offset 1 pixel from previous split'
                               % (self._axis, self._n, index + 1))
-            start[1] = index % self._nT * self.sizeTC + offsetC
+            start[1] = 0 if index == 0 else index % self._nT * self.sizeTC + self.offset_c
             stop = numpy.zeros(self._pixel_array.ndim, numpy.int16)
-            stop[1] = start[1] + self.sizeTC
+            stop[1] = self._pixel_array.shape[1] if self.index == self._nT - 1 else start[1] + self.sizeTC + self.offset_c
 
-            start[0] = int(math.floor(self.index / self._nT)) * self.sizeR + offsetR
-            stop[0] = start[0] + self.sizeR
+            start[0] = 0
+            stop[0] = start[0] + self.sizeR + self._offsetInPx
             indicesC = numpy.arange(start[1], stop[1])
             indicesR = numpy.arange(start[0], stop[0])
         else:
@@ -151,13 +178,13 @@ class DICOMSplitterTB:
                 warnings.warn('image axis %d not divisible by %d'
                               ', split %d offset 1 pixel from previous split'
                               % (self._axis, self._nB, index + 1))
-            start[1] = (index - self._nT) % self._nB * self.sizeBC + offsetC
+            start[1] = 0 if (index - self._nT) == 0 else (index - self._nT) % self._nB * self.sizeBC + self.offset_c
             stop = numpy.zeros(self._pixel_array.ndim, numpy.int16)
-            stop[1] = start[1] + self.sizeBC
+            stop[1] = self._pixel_array.shape[1] if self.index - self._nT == self._nB - 1 else start[1] + self.sizeBC + self.offset_c
 
             # assume only 2 row for now
-            start[0] = self.sizeR + offsetR
-            stop[0] = start[0] + self.sizeR + 2 * self._offsetInPx
+            start[0] = self.sizeR + self._offsetInPx
+            stop[0] = self._pixel_array.shape[0]
             indicesC = numpy.arange(start[1], stop[1])
             indicesR = numpy.arange(start[0], stop[0])
         self.index += 1
@@ -168,10 +195,11 @@ class DICOMSplitterTB:
         return index, start, self._pixel_array[start[0]:stop[0],start[1]:stop[1]]
 
 class DICOMSplitter:
-    def __init__(self, pixel_array=None, axis=0, n=2):
+    def __init__(self, pixel_array=None, axis=0, n=2, offset=0):
         self._pixel_array = pixel_array
         self._axis = axis
         self._n = n
+        self._offset = offset
 
     @property
     def pixel_array(self):
@@ -197,6 +225,14 @@ class DICOMSplitter:
     def n(self, n):
         self._n = n
 
+    @property
+    def offset(self):
+        return self._offset
+
+    @offset.setter
+    def offset(self, offset):
+        self._offset = offset
+
     def __iter__(self):
         self.index = 0
         if self._pixel_array is not None:
@@ -221,9 +257,9 @@ class DICOMSplitter:
             warnings.warn('image axis %d not divisible by %d'
                           ', split %d offset 1 pixel from previous split'
                           % (self._axis, self._n, index + 1))
-        start[self._axis] = index * self.size + offset
+        start[self._axis] = 0 if index == 0 else index * self.size + offset + self._offset
         stop = numpy.zeros(self._pixel_array.ndim, numpy.int16)
-        stop[self._axis] = start[self._axis] + self.size
+        stop[self._axis] = self._pixel_array.shape[self._axis] if self.index == self._n - 1 else start[self._axis] + self.size + self._offset
         indices = numpy.arange(start[self._axis], stop[self._axis])
         self.index += 1
         # print(self.index)
@@ -401,31 +437,36 @@ def set_pixel_data(dataset, pixel_array):
     dataset.Rows, dataset.Columns = pixel_array.shape
 
 def checkDirectory(directory, output_dir=None):
+    logger.debug(f'checkDirectory({directory}, {output_dir})')
     for root, subdirs, files in os.walk(directory):
         if len(files):
             if files.pop(0) != '.DS_Store':
                 newRoot = output_dir
-                for subdirs in root.split('/')[1:]:
+                for subdirs in [os.path.basename(directory), *os.path.relpath(root, directory).split('/')]:
                     newRoot = os.path.join(newRoot, subdirs)
                 if not os.path.exists(newRoot):
-                    os.makedirs(newRoot)
+                    os.makedirs(newRoot, exist_ok=True)
+                logger.debug(f'checkDirectory yield root: {root} newRoot: {newRoot}')
                 yield root, newRoot
-def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset=5, keep_origin=False,
+def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset_ud=0, offset_lr=0, keep_origin=False,
                           study_instance_uids=None, series_instance_uids=None,
                           series_descriptions=None, output_dir=None,
                           derivation_description=None, patient_names=None,
-                          patient_ids=None, output_paths=None,
-                          mangle_output_paths=False, order=None, orderT=None, orderB=None):
+                          patient_ids=None, order=None, orderT=None, orderB=None,
+                          patient_weights=None, patient_orientations=None, patient_comments=None,
+                          ra_ph_start_times=None, ra_nuc_tot_doses=None):
+    logger.info(f'Splitting directory {directory}')
     if nTB is not None:
         orderT = orderT.split(',')
         orderB = orderB.split(',')
-        if int(kwargs.get('nTB')[0].split(',')[0]) != len(orderT):
+        if int(nTB.split(',')[0]) != len(orderT):
             raise Exception('[ERROR] # of split has to equal to length of order on Top')
-        if int(kwargs.get('nTB')[0].split(',')[1]) != len(orderB):
+        if int(nTB.split(',')[1]) != len(orderB):
             raise Exception('[ERROR] # of split has to equal to length of order on Bottom')
-        # print (orderT)
-        # print (orderB)
         order = orderT + orderB
+        nT = int(nTB.split(',')[0])
+        nB = int(nTB.split(',')[1])
+        n = nT + nB
     else:
         order = order.split(',')
         if n != len(order):
@@ -438,7 +479,27 @@ def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset=5, keep_origi
             raise ValueError
         if study_instance_uids and len(study_instance_uids) != n:
             raise ValueError
+
+    if patient_weights and n != len(patient_weights):
+        raise Exception('[ERROR] # of patient_weights has to equal to n')
+
+    if patient_orientations and n != len(patient_orientations):
+        raise Exception('[ERROR] # of patient_orientation has to equal to n')
+
+    if patient_comments and n != len(patient_comments):
+        raise Exception('[ERROR] # of patient_comments has to equal to n')
+
+    if ra_ph_start_times and n != len(ra_ph_start_times):
+        raise Exception('[ERROR] # of ra_ph_start_times has to equal to n')
+
+    if ra_nuc_tot_doses and n != len(ra_nuc_tot_doses):
+        raise Exception('[ERROR] # of ra_nuc_tot_dose has to equal to n')
+
+    outputs = {}  # PatientName -> [split dcm files]
+
     for directoryChecked, newRoot in checkDirectory(directory, output_dir):
+
+        series_instance_uids = [x667_uuid() for i in range(n)]
 
         for path, dataset in DICOMDirectory(directoryChecked):
             try:
@@ -446,12 +507,12 @@ def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset=5, keep_origi
             except (TypeError, AttributeError):
                 pixel_array = None
             if nTB is not None:
-                nT = int(kwargs.get('nTB')[0].split(',')[0])
-                nB = int(kwargs.get('nTB')[0].split(',')[1])
-                dicom_splitter = DICOMSplitterTB(pixel_array, axis, nT, nB, offset)
+                nT = int(nTB.split(',')[0])
+                nB = int(nTB.split(',')[1])
+                dicom_splitter = DICOMSplitterTB(pixel_array, axis, nT, nB, offset_ud, offset_lr)
                 n = nT + nB
             else:
-                dicom_splitter = DICOMSplitter(pixel_array, axis, n)
+                dicom_splitter = DICOMSplitter(pixel_array, axis, n, offset_lr if axis == 1 else offset_ud)
             dataset.ImageType = ['DERIVED', 'PRIMARY', 'SPLIT']
 
             dataset.DerivationDescription = derivation_description
@@ -468,13 +529,14 @@ def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset=5, keep_origi
 
             parsed_patient_names, parsed_patient_ids = parsed
 
+            for name in parsed_patient_names:
+                if name not in outputs:
+                    outputs[name] = []
+
             name_trailing, id_trailing = trailing
 
             if not study_instance_uids:
                 study_instance_uids = [x667_uuid() for i in range(n)]
-
-            if not series_instance_uids:
-                series_instance_uids = [x667_uuid() for i in range(n)]
 
             for i, origin, pixel_array in dicom_splitter:
                 if parsed_patient_names[i] != 'blank':
@@ -500,28 +562,38 @@ def split_dicom_directory(directory, axis=0, n=3, nTB=None, offset=5, keep_origi
                     if series_descriptions:
                         split_dataset.SeriesDescription = series_descriptions[i]
                     else:
-                        if split_dataset.Modality == 'PT':
-                            split_dataset.SeriesDescription = parsed_patient_ids[i] + '.pet split'
-                        elif split_dataset.Modality == 'CT':
-                            split_dataset.SeriesDescription = parsed_patient_ids[i] + '.ct split'
+                        if 'SeriesDescription' in split_dataset:
+                            split_dataset.SeriesDescription += ' split ' + parsed_patient_ids[i]
                         else:
-                            split_dataset.SeriesDescription += ' split'
+                            split_dataset.SeriesDescription = 'split ' + parsed_patient_ids[i]
 
                     split_dataset.PatientName = parsed_patient_names[i]
                     split_dataset.PatientID = parsed_patient_ids[i]
 
-                    split_dataset.SeriesNumber = (10 *  split_dataset.SeriesNumber) + i + 1
+                    if patient_weights:
+                        split_dataset.PatientWeight = patient_weights[i]
 
-                    if output_paths:
-                        output_path = os.path.join(output_paths, output_paths[i])
-                    elif mangle_output_paths:
-                        output_path = parsed_patient_ids[i] + id_trailing
-                    else:
-                        output_path = None
-                    created_output_path = make_output_path(newRoot, parsed_patient_names[i], output_path)
+                    if patient_comments:
+                        split_dataset.PatientComments = patient_comments[i]
 
+                    if patient_orientations:
+                        split_dataset.PatientOrientation = patient_orientations[i]
+
+                    if split_dataset.Modality == 'PT':
+                        if ra_ph_start_times:
+                            split_dataset.RadiopharmaceuticalInformationSequence[0].RadiopharmaceuticalStartTime = \
+                                ra_ph_start_times[i]
+                        if ra_nuc_tot_doses:
+                            split_dataset.RadiopharmaceuticalInformationSequence[0].RadionuclideTotalDose = \
+                                ra_nuc_tot_doses[i]
+
+                    created_output_path = make_output_path(newRoot, parsed_patient_names[i], None)
                     filename = os.path.join(created_output_path, os.path.basename(path))
                     split_dataset.save_as(filename)
+                    outputs[parsed_patient_names[i]].append(filename)
+
+    return outputs
+
 
 if __name__ == '__main__':
     import argparse
@@ -556,8 +628,10 @@ if __name__ == '__main__':
     parser.add_argument('-order', '--order', help='order of patient placed in scanner', default='1,1,1')
     parser.add_argument('-orderT', '--orderT', help='order of patient placed in scanner of top bed', default='1,1,1')
     parser.add_argument('-orderB', '--orderB', help='order of patient placed in scanner of bottom bed', default='1,1,1')
-    parser.add_argument('-offset', '--offset', type=int, default=5,
-                        help='offset from center, default 5 percent from center')
+    parser.add_argument('-offset_ud', '--offset_ud', type=int, default=0,
+                        help='Offset in pixels. 0 means no offset, + values offset down, - values offset up')
+    parser.add_argument('-offset_lr', '--offset_lr', type=int, default=0,
+                        help='Offset in pixels. 0 means no offset, + values offset right, - values offset left')
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-n', type=int, help='split into N volumes')
