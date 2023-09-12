@@ -156,10 +156,10 @@ class DICOMSplitterTB:
             offsetC = max(0, index + 1 + remainderC - self._nT)
             remainderR = self._pixel_array.shape[0] % 2
             offsetR = max(0, index + 1 + remainderR - 2)
-            if offsetC:
-                warnings.warn('image axis %d not divisible by %d'
-                              ', split %d offset 1 pixel from previous split'
-                              % (self._axis, self._n, index + 1))
+            # if offsetC:
+            #     warnings.warn('image axis %d not divisible by %d'
+            #                   ', split %d offset 1 pixel from previous split'
+            #                   % (self._axis, self._n, index + 1))
             start[1] = 0 if index == 0 else index % self._nT * self.sizeTC + self.offset_c
             stop = numpy.zeros(self._pixel_array.ndim, numpy.int16)
             stop[1] = self._pixel_array.shape[1] if self.index == self._nT - 1 else start[1] + self.sizeTC + self.offset_c
