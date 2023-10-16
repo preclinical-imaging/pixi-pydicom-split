@@ -6,8 +6,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt && \
     rm requirements.txt
 
-COPY pydicom_split.py ./
-COPY xnat_run_pydicom_split.py ./
+COPY --chmod=755 pydicom_split.py ./
+COPY --chmod=755 xnat_run_pydicom_split.py ./
 
 ENTRYPOINT [ "python", "./pydicom_split.py" ]
 CMD ["--help"]
